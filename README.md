@@ -1,40 +1,72 @@
-# Casual Trajectory Analysis
+# 🚗 Counterfactual Scene Reasoning for Trajectory Prediction
 
-Counterfactual trajectory reasoning for collision-risk analysis on KITTI-style tracking data.
+A system that models object motion from real-world driving data, simulates counterfactual scenarios, and evaluates collision risk using **transformer-based trajectory prediction**, **scene graphs**, and **time-to-collision (TTC) reasoning**.
 
-This project predicts short-horizon vehicle trajectories, applies a counterfactual intervention (speed increase), and compares risk between the original and modified futures using scene-graph relations, relative motion, and time-to-collision (TTC).
+---
 
-## Overview
+## 🔥 Overview
 
-The repository implements a full mini-pipeline:
+This project goes beyond standard trajectory prediction by introducing **causal reasoning over motion dynamics**.
 
-1. Parse KITTI tracking labels.
-2. Build and clean per-object trajectories.
-3. Create training windows (past 5 steps -> future 3 steps).
-4. Train a Transformer-based trajectory predictor.
-5. Simulate a counterfactual action with increased speed.
-6. Compute relational scene-graph features and collision risk.
-7. Visualize original vs counterfactual outcomes.
+Instead of just predicting where objects will go, the system answers:
 
-## Key Features
+> *“What happens if an object behaves differently?”*
 
-- Transformer trajectory prediction (`TrajectoryTransformer`)
-- Counterfactual simulation (`increase_speed`)
-- Scene-graph relation reasoning (`approaching`, `moving_away`, `parallel`)
-- Risk scoring from distance + relative motion + TTC
-- Human-readable textual explanation of safety state
-- Plot-based visual comparison of trajectories
+It does this by:
+- Learning motion patterns from data (Transformer)
+- Simulating alternative futures (Counterfactuals)
+- Modeling interactions between agents (Scene Graph)
+- Quantifying risk using physics-based metrics (TTC)
 
-## Example Output
+---
 
-The following values are from an observed run:
+## 🧠 Key Features
 
-```text
+- ✅ Transformer-based trajectory prediction  
+- ✅ Counterfactual simulation (behavior intervention)  
+- ✅ Scene graph representation of interactions  
+- ✅ Motion-aware reasoning (direction + velocity)  
+- ✅ Time-to-Collision (TTC) risk modeling  
+- ✅ Human-readable explanations  
+
+---
+
+## 🏗️ System Pipeline
+Input Trajectories (KITTI)
+↓
+Transformer Model
+↓
+Future Prediction
+↓
+Counterfactual Simulation
+↓
+Scene Graph Construction
+↓
+TTC-based Risk Evaluation
+↓
+Explanation Generation
+
+---
+
+## 📊 Example Output
+
+### 🖼️ Visualization
+
+![Counterfactual Trajectory](Figure_4.png)
+
+---
+
+### 📈 Metrics
+
 --- Metrics ---
 Original Distance: 0.0133
 Counterfactual Distance: 0.0197
 Motion Score (Original): 0.006651
 Motion Score (Counterfactual): -0.007745
+
+---
+
+### 🧩 Scene Graph
 
 --- Scene Graph (Original) ---
 {'object_A': 'Car_A', 'object_B': 'Car_B', 'relation': 'moving_away', 'distance': 0.019852565601468086, 'motion': 0.0066507430747151375, 'risk': 'LOW'}
@@ -42,24 +74,32 @@ Motion Score (Counterfactual): -0.007745
 --- Scene Graph (Counterfactual) ---
 {'object_A': 'Car_A', 'object_B': 'Car_B', 'relation': 'approaching', 'distance': 0.019712993875145912, 'motion': -0.007745200302451849, 'risk': 'HIGH'}
 
+---
+
+### ⚠️ Risk Analysis
+
 --- Risk Analysis ---
 Original: LOW (monitor)
 Counterfactual: HIGH (collision soon)
+
+---
+
+### 🧾 Explanation
 
 --- Explanation ---
 Car_A is moving away from Car_B (distance=0.0199). Risk: LOW.
 Car_A is approaching Car_B (distance=0.0197, TTC=2.54s). Risk: HIGH.
 ```
 
+---
+
+## 🧠 Interpretation
+
+The counterfactual intervention changed interaction dynamics from:
+
 Interpretation: the counterfactual intervention changed interaction dynamics from moving away to approaching, which flipped risk from LOW to HIGH.
 
-## Visualizations
-
-Here is how the projected trajectories and counterfactual changes look. 
-
 ![Screenshot](Screenshot%202026-04-23%20211233.png)
-
-![Figure 4](Figure_4.png)
 
 ## Repository Structure
 
@@ -85,6 +125,48 @@ Casual-Trajectory-Analysis/
 |   `-- testing/
 `-- model.pth                    # Trained weights
 ```
+
+👉 This demonstrates that **small behavioral changes can significantly alter collision risk**, highlighting the importance of causal reasoning in dynamic environments.
+
+---
+
+## ⚙️ Tech Stack
+
+- PyTorch (Transformer models)
+- NumPy (simulation & physics)
+- OpenCV (data handling)
+- Matplotlib (visualization)
+- KITTI Dataset (real-world driving data)
+
+---
+
+## 🚀 Why This Project Stands Out
+
+Most trajectory prediction projects:
+- Only predict future positions
+
+This project:
+- Models **interactions**
+- Simulates **alternate futures**
+- Uses **physics-based reasoning**
+- Produces **interpretable outputs**
+
+👉 This makes it closer to real-world systems used in:
+- Autonomous driving
+- Robotics
+- Decision intelligence systems
+
+---
+
+## 🔮 Future Work
+
+- Multi-agent transformer (learn interactions directly)
+- Attention visualization (interpretability)
+- Real-time simulation UI (Streamlit)
+- Multi-object scene graphs (3+ agents)
+
+---
+
 
 ## Installation
 
@@ -156,6 +238,7 @@ This prints:
 - Natural-language explanation
 
 It also opens a Matplotlib visualization comparing trajectories.
+![Counterfactual Trajectory](Figure_3.png)
 
 ## Core Risk Logic
 
@@ -170,13 +253,8 @@ It also opens a Matplotlib visualization comparing trajectories.
 - Interaction pair selection is heuristic (first intersecting pair).
 - Paths are partially hard-coded and should be parameterized for portability.
 
-## Future Improvements
+## 📌 Author
 
-- Config file/CLI arguments for data/model paths
-- More robust multi-agent interaction selection
-- Batch evaluation on multiple KITTI sequences
-- Quantitative metrics logging (ADE/FDE and risk confusion matrix)
+Divyansh Gupta
 
-## License
-
-MIT License (see `LICENSE`).
+---
