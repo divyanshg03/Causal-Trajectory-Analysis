@@ -10,11 +10,6 @@ from model import TrajectoryTransformer
 from counterfactual.simulate import increase_speed
 from scene_graph.graph import build_scene_graph
 
-
-# ==============================
-# 🔹 Helper Functions
-# ==============================
-
 def trajectories_intersect(traj1, traj2, thresh=0.05):
     for p1 in traj1:
         for p2 in traj2:
@@ -50,7 +45,7 @@ def relative_motion_towards(traj1, traj2):
 
 def compute_ttc(distance, motion):
     if motion >= 0:
-        return float('inf')  # not approaching
+        return float('inf')
 
     return distance / abs(motion)
 def classify_risk(distance, motion):
@@ -66,6 +61,8 @@ def classify_risk(distance, motion):
         return "⚠️ LOW (monitor)"
     else:
         return "✅ SAFE"
+
+
 def velocity(traj):
     return traj[-1] - traj[-2]
 
@@ -85,9 +82,6 @@ def explain(scene):
             f"{scene['object_A']} is moving away from {scene['object_B']} "
             f"(distance={distance:.4f}). Risk: {scene['risk']}."
         )
-# ==============================
-# 🔹 Load Data
-# ==============================
 
 label_path = "E:/Coding/PROGRAMS/Deep learning Projects/CSIE/data/training/label_02/0000.txt"
 
@@ -100,26 +94,11 @@ X, Y = normalize(X, Y)
 
 print("X shape:", X.shape)
 
-
-# ==============================
-# 🔹 Load Transformer Model
-# ==============================
-
 model = TrajectoryTransformer()
 model.load_state_dict(torch.load("model.pth"))
 model.eval()
 
-
-# ==============================
-# 🔹 Select interacting objects
-# ==============================
-
 sample1, sample2 = find_interacting_pair(X)
-
-
-# ==============================
-# 🔹 Predict Futures
-# ==============================
 
 inp1 = torch.tensor(sample1, dtype=torch.float32).unsqueeze(0)
 inp2 = torch.tensor(sample2, dtype=torch.float32).unsqueeze(0)
@@ -127,29 +106,14 @@ inp2 = torch.tensor(sample2, dtype=torch.float32).unsqueeze(0)
 pred1 = model(inp1).detach().numpy()[0]
 pred2 = model(inp2).detach().numpy()[0]
 
-
-# ==============================
-# 🔹 Counterfactual
-# ==============================
-
 cf_sample1 = increase_speed(sample1, factor=2.0)
 
 cf_pred1 = model(
     torch.tensor(cf_sample1, dtype=torch.float32).unsqueeze(0)
 ).detach().numpy()[0]
 
-
-# ==============================
-# 🔹 Scene Graph
-# ==============================
-
 scene_original = build_scene_graph(pred1, pred2)
 scene_counterfactual = build_scene_graph(cf_pred1, pred2)
-
-
-# ==============================
-# 🔹 Metrics
-# ==============================
 
 dist_original = compute_min_distance(pred1, pred2)
 dist_counterfactual = compute_min_distance(cf_pred1, pred2)
@@ -163,39 +127,19 @@ print(f"Counterfactual Distance: {dist_counterfactual:.4f}")
 print(f"Motion Score (Original): {motion_original:.6f}")
 print(f"Motion Score (Counterfactual): {motion_counterfactual:.6f}")
 
-
-# ==============================
-# 🔹 Scene Graph Output
-# ==============================
-
 print("\n--- Scene Graph (Original) ---")
 print(scene_original)
 
 print("\n--- Scene Graph (Counterfactual) ---")
 print(scene_counterfactual)
 
-
-# ==============================
-# 🔹 Risk Analysis
-# ==============================
-
 print("\n--- Risk Analysis ---")
 print("Original:", classify_risk(dist_original, motion_original))
 print("Counterfactual:", classify_risk(dist_counterfactual, motion_counterfactual))
 
-
-# ==============================
-# 🔹 Explanation
-# ==============================
-
 print("\n--- Explanation ---")
 print(explain(scene_original))
 print(explain(scene_counterfactual))
-
-
-# ==============================
-# 🔹 Visualization
-# ==============================
 
 plt.figure(figsize=(6, 6))
 

@@ -11,7 +11,7 @@ def parse_kitti_labels(label_file):
         track_id = int(parts[1])
         obj_type = parts[2]
 
-        bbox = list(map(float, parts[6:10]))  # x1, y1, x2, y2
+        bbox = list(map(float, parts[6:10]))
 
         if frame not in data:
             data[frame] = []
@@ -27,4 +27,4 @@ def parse_kitti_labels(label_file):
 
 if __name__ == "__main__":
     labels = parse_kitti_labels(r"E:\Coding\PROGRAMS\Deep learning Projects\CSIE\data\training\label_02\0000.txt")
-    print(labels[0][:2])  # sample
+    print(labels[0][:2])

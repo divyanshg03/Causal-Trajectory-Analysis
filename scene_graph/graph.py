@@ -50,7 +50,6 @@ def build_scene_graph(traj1, traj2):
 
     relation = compute_relation(traj1, traj2)
 
-    # compute motion SAME WAY as main pipeline
     pos_diff = traj2[-1] - traj1[-1]
     vel1 = compute_velocity(traj1)
     vel2 = compute_velocity(traj2)

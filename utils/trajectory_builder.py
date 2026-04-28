@@ -6,7 +6,6 @@ def build_trajectories(label_data):
             tid = obj["track_id"]
             bbox = obj["bbox"]
 
-            # center point
             x = (bbox[0] + bbox[2]) / 2
             y = (bbox[1] + bbox[3]) / 2
 

@@ -7,10 +7,8 @@ class TrajectoryTransformer(nn.Module):
 
         self.future_steps = future_steps
 
-        # input embedding
         self.input_proj = nn.Linear(input_dim, d_model)
 
-        # positional encoding
         self.pos_embedding = nn.Parameter(torch.randn(1, 10, d_model))
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -21,19 +19,15 @@ class TrajectoryTransformer(nn.Module):
      
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        # output head
         self.fc = nn.Linear(d_model, future_steps * 2)
 
     def forward(self, x):
-        # x: (batch, seq, 2)
         x = self.input_proj(x)
 
-        # add positional encoding
         x = x + self.pos_embedding[:, :x.size(1), :]
 
         out = self.transformer(x)
 
-        # use last token
         out = out[:, -1, :]
 
         out = self.fc(out)

@@ -51,7 +51,6 @@ if __name__ == "__main__":
 
     X, Y = normalize(X, Y)
 
-    # 🔥 REAL transformer
     model = TrajectoryTransformer()
 
     train_model(model, X, Y, epochs=250)

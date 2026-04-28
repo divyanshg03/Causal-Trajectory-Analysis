@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 from model import TrajectoryPredictor
 from counterfactual.simulate import increase_speed
 
-# load trained model
 model = TrajectoryPredictor()
 model.load_state_dict(torch.load("model.pth"))
 model.eval()
@@ -33,12 +32,10 @@ cf_sample = increase_speed(sample, 1.5)
 cf_inp = torch.tensor(cf_sample, dtype=torch.float32).unsqueeze(0)
 cf = model(cf_inp).detach().numpy()[0]
 
-# plot
 past = sample
 plt.plot(orig[:,0], orig[:,1], 'go-', label="Original Future")
 plt.plot(cf[:,0], cf[:,1], 'ro-', label="Counterfactual")
 
-# 🔥 draw difference arrows
 for i in range(len(orig)):
     plt.arrow(orig[i,0], orig[i,1],
               cf[i,0]-orig[i,0],
