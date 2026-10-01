@@ -1,23 +1,30 @@
 """Pairwise interaction metrics, TTC-based risk and scene-graph construction.
 
-All geometry here is in *normalized image-plane* units (see ``data.normalize``)
-and velocities are per frame. TTC is therefore reported in frames and
-converted to seconds with the KITTI frame rate; it is an image-plane
-approximation, not a metric time-to-collision.
+Geometry is in **meters** (BEV, ego-camera frame) and velocities are per
+frame, so times are in seconds at the KITTI frame rate. Everything uses the
+*relative* motion of the two predicted trajectories, which is unaffected by
+the ego camera moving.
+
+Time to collision is measured from "now" (the last observed frame):
+
+* if the predicted gap drops below ``COLLISION_RADIUS`` inside the horizon,
+  TTC is the time of the first such step;
+* otherwise, if the agents are still approaching at the end of the horizon,
+  TTC extrapolates that closing speed from the horizon end;
+* otherwise it is infinite.
 """
 
 import numpy as np
 
-KITTI_FPS = 10.0
+from .data import KITTI_FPS
+
 EPS = 1e-6
 
+COLLISION_RADIUS = 2.0  # meters between agent centers counted as overlap
+NEAR_DISTANCE = 5.0  # meters; "LOW" if the pair ever comes this close
 # (upper TTC bound in seconds, label); evaluated in order.
 TTC_BANDS = ((1.0, "CRITICAL"), (3.0, "HIGH"), (5.0, "MEDIUM"))
-NEAR_DISTANCE = 0.02  # normalized units; "LOW" if closer than this and not approaching fast
-
-
-def velocity(traj):
-    return traj[-1] - traj[-2]
+RISK_ORDER = ("SAFE", "LOW", "MEDIUM", "HIGH", "CRITICAL")
 
 
 def distance(traj1, traj2):
@@ -25,68 +32,89 @@ def distance(traj1, traj2):
     return float(np.linalg.norm(traj1[-1] - traj2[-1]))
 
 
-def min_distance(traj1, traj2):
-    """Minimum distance over time-aligned points."""
+def gap_series(traj1, traj2):
+    """Time-aligned distance between the two trajectories, shape (T,)."""
     n = min(len(traj1), len(traj2))
-    return float(np.min(np.linalg.norm(traj1[:n] - traj2[:n], axis=1)))
+    return np.linalg.norm(np.asarray(traj2[:n]) - np.asarray(traj1[:n]), axis=1)
 
 
-def closing_speed(traj1, traj2):
-    """Rate (units/frame) at which agent 2 moves towards agent 1.
+def min_distance(traj1, traj2):
+    return float(gap_series(traj1, traj2).min())
 
-    Negative means the agents are approaching each other.
+
+def closing_speed(traj1, traj2, k=3):
+    """Rate (m/frame) at which agent 2 moves towards agent 1 at the last step.
+
+    Velocity is a ``k``-step average to damp prediction jitter. Negative means
+    the agents are approaching each other.
     """
-    pos_diff = traj2[-1] - traj1[-1]
-    vel_diff = velocity(traj2) - velocity(traj1)
-    return float(np.dot(pos_diff, vel_diff) / (np.linalg.norm(pos_diff) + EPS))
+    n = min(len(traj1), len(traj2))
+    k = max(1, min(k, n - 1))
+    rel = np.asarray(traj2[:n]) - np.asarray(traj1[:n])
+    rel_vel = (rel[-1] - rel[-1 - k]) / k
+    return float(np.dot(rel[-1], rel_vel) / (np.linalg.norm(rel[-1]) + EPS))
 
 
-def relation(motion):
-    if motion < 0:
+def relation(traj1, traj2):
+    """Overall trend of the gap over the horizon."""
+    gap = gap_series(traj1, traj2)
+    delta = gap[-1] - gap[0]
+    if delta < -0.05:
         return "approaching"
-    if motion > 0:
+    if delta > 0.05:
         return "moving_away"
     return "parallel"
 
 
-def ttc_seconds(dist, motion, fps=KITTI_FPS):
-    """Time to collision in seconds (``inf`` unless approaching)."""
-    if motion >= 0:
+def time_to_collision(traj1, traj2, fps=KITTI_FPS, radius=COLLISION_RADIUS):
+    """Time to collision in seconds from the last observed frame (see module doc)."""
+    gap = gap_series(traj1, traj2)
+    hit = np.flatnonzero(gap < radius)
+    if len(hit):
+        return float(hit[0] + 1) / fps
+    closing = closing_speed(traj1, traj2)
+    if closing >= 0:
         return float("inf")
-    return dist / abs(motion) / fps
+    return float(len(gap) / fps + max(gap[-1] - radius, 0.0) / abs(closing) / fps)
 
 
-def classify_risk(dist, motion, fps=KITTI_FPS):
-    ttc = ttc_seconds(dist, motion, fps)
+def risk_from_ttc(ttc, min_dist, near_distance=NEAR_DISTANCE):
     for bound, label in TTC_BANDS:
         if ttc < bound:
             return label
-    return "LOW" if dist < NEAR_DISTANCE else "SAFE"
+    return "LOW" if min_dist < near_distance else "SAFE"
+
+
+def assess_pair(traj1, traj2, fps=KITTI_FPS, radius=COLLISION_RADIUS):
+    """Risk summary of two predicted trajectories (each ``(T, 2)`` in meters)."""
+    min_d = min_distance(traj1, traj2)
+    ttc = time_to_collision(traj1, traj2, fps, radius)
+    return {
+        "relation": relation(traj1, traj2),
+        "distance_m": distance(traj1, traj2),
+        "min_distance_m": min_d,
+        "closing_speed_mps": closing_speed(traj1, traj2) * fps,
+        "ttc_s": ttc,
+        "risk": risk_from_ttc(ttc, min_d),
+    }
 
 
 def build_scene_graph(traj1, traj2, name_a="Car_A", name_b="Car_B"):
     """Describe the relation between two predicted trajectories."""
-    dist = distance(traj1, traj2)
-    motion = closing_speed(traj1, traj2)
-    return {
-        "object_A": name_a,
-        "object_B": name_b,
-        "relation": relation(motion),
-        "distance": dist,
-        "motion": motion,
-        "ttc_s": ttc_seconds(dist, motion),
-        "risk": classify_risk(dist, motion),
-    }
+    return {"object_A": name_a, "object_B": name_b, **assess_pair(traj1, traj2)}
 
 
 def explain(scene):
     a, b = scene["object_A"], scene["object_B"]
-    if scene["motion"] < 0:
+    if np.isfinite(scene["ttc_s"]):
+        verb = "are on course to meet" if scene["ttc_s"] < 10 else "are slowly closing in"
         return (
-            f"{a} is approaching {b} (distance={scene['distance']:.4f}, "
-            f"TTC={scene['ttc_s']:.2f}s). Risk: {scene['risk']}."
+            f"{a} and {b} {verb}: closest approach "
+            f"{scene['min_distance_m']:.1f} m, TTC={scene['ttc_s']:.1f} s. "
+            f"Risk: {scene['risk']}."
         )
+    verb = "moving away from" if scene["relation"] == "moving_away" else "keeping pace with"
     return (
-        f"{a} is moving away from {b} (distance={scene['distance']:.4f}). "
+        f"{a} is {verb} {b} (closest approach {scene['min_distance_m']:.1f} m). "
         f"Risk: {scene['risk']}."
     )
