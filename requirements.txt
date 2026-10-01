@@ -1,0 +1,5 @@
+torch>=2.0
+numpy>=1.24
+matplotlib>=3.7
+# Only needed for cftraj.data.load_kitti_frames
+opencv-python>=4.8
