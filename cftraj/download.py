@@ -6,7 +6,7 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_BASE_URL = (
-    "https://github.com/divyanshg03/Casual-Trajectory-Analysis/releases/download/checkpoints-v1"
+    "https://github.com/divyanshg03/Causal-Trajectory-Analysis/releases/download/checkpoints-v1"
 )
 MANIFEST = "MANIFEST.json"  # {filename: sha256}, committed next to the checkpoints
 

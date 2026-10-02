@@ -10,6 +10,7 @@ from .counterfactual import INTERVENTIONS
 from .data import load_split, load_windows
 from .evaluate import parse_ckpt_specs, run_evaluation
 from .model import ARCHS, load_model
+from .tracking import Tracker
 from .train import pick_device, train_model
 
 DEFAULT_DIR = "data/training/label_02"
@@ -61,6 +62,8 @@ def build_parser():
                    help="augment by replaying targets at a random speed factor in [LO, HI]")
     t.add_argument("--n-modes", type=int, default=1,
                    help="predict K trajectories (winner-takes-all training); 1 = single future")
+    t.add_argument("--track", choices=("wandb", "mlflow"), default=None,
+                   help="log the run to Weights & Biases or MLflow (must be installed)")
     t.add_argument("--amp", action="store_true", help="mixed precision (CUDA only)")
     t.add_argument("--cache-dir", default=None, help="cache preprocessed windows here")
     t.add_argument("--seed", type=int, default=0)
@@ -85,6 +88,14 @@ def build_parser():
     c.add_argument("--cache-dir", default=None)
     c.add_argument("--out", default=None, help="write the markdown table here")
     c.add_argument("--device", default="cpu")
+
+    eu = sub.add_parser("ethucy", help="leave-one-scene-out benchmark on ETH/UCY pedestrians")
+    eu.add_argument("--root", default="data/ethucy", help="<root>/<scene>/{train,val,test}/*.txt")
+    eu.add_argument("--scenes", nargs="+", default=["eth", "hotel", "univ", "zara1", "zara2"])
+    eu.add_argument("--seeds", type=int, nargs="+", default=[0])
+    eu.add_argument("--epochs", type=int, default=60)
+    eu.add_argument("--out", default=None, help="write the markdown table here")
+    eu.add_argument("--device", default="auto")
 
     dl = sub.add_parser("download", help="fetch the shipped checkpoints listed in MANIFEST.json")
     dl.add_argument("--dir", default="checkpoints")
@@ -167,12 +178,17 @@ def main(argv=None):
             val_w = load_split(args.label_dir, "val", **kw)
             out = args.out or f"outputs/{args.arch}.pt"
             Path(out).parent.mkdir(parents=True, exist_ok=True)
-            train_model(args.arch, train_w, val_w, out, args.epochs, args.batch_size,
-                        args.lr, patience=args.patience, seed=args.seed, device=args.device,
-                        speed_aug=tuple(args.speed_aug) if args.speed_aug else None,
-                        amp=args.amp, run_args=vars(args),
-                        **({"n_modes": args.n_modes} if args.n_modes > 1 else {}),
-                        **({"linear_skip": True, "residual": False} if args.ridge_prior else {}))
+            tracker = Tracker(args.track, run_name=Path(out).stem, params=vars(args))
+            try:
+                train_model(args.arch, train_w, val_w, out, args.epochs, args.batch_size,
+                            args.lr, patience=args.patience, seed=args.seed, device=args.device,
+                            tracker=tracker,
+                            speed_aug=tuple(args.speed_aug) if args.speed_aug else None,
+                            amp=args.amp, run_args=vars(args),
+                            **({"n_modes": args.n_modes} if args.n_modes > 1 else {}),
+                            **({"linear_skip": True, "residual": False} if args.ridge_prior else {}))
+            finally:
+                tracker.finish()
         elif args.command == "evaluate":
             run_evaluation(args.label_dir, parse_ckpt_specs(args.ckpt), args.out_dir, args.device,
                            cache_dir=args.cache_dir)
@@ -183,6 +199,17 @@ def main(argv=None):
                                 arch=args.arch, epochs=args.epochs, seed=args.seed,
                                 device=args.device, cache_dir=args.cache_dir)
             text = render(cv)
+            print("\n" + text)
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(text + "\n", encoding="utf-8")
+        elif args.command == "ethucy":
+            from .ethucy import render as render_eu
+            from .ethucy import run_ethucy
+
+            res = run_ethucy(args.root, args.scenes, seeds=tuple(args.seeds),
+                             epochs=args.epochs, device=pick_device(args.device))
+            text = render_eu(res)
             print("\n" + text)
             if args.out:
                 Path(args.out).parent.mkdir(parents=True, exist_ok=True)

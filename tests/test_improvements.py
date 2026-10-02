@@ -438,3 +438,84 @@ def test_cli_analyze_reports_uncertainty_and_implausibility(tmp_path, kitti_dir,
     out = capsys.readouterr().out
     assert "Uncertainty (sampled futures)" in out and "P(overlap)=" in out
     assert "Warning: the intervened history needs" in out  # a 3-frame delay is unphysical
+
+
+def test_tracker_noop_and_backend_errors(monkeypatch):
+    from cftraj.tracking import Tracker
+
+    t = Tracker()
+    t.log({"a": 1}, step=1), t.summary({"b": 2}), t.finish()  # no-op, no error
+    with pytest.raises(ValueError, match="Unknown tracking backend"):
+        Tracker("tensorboard")
+    monkeypatch.setitem(__import__("sys").modules, "wandb", None)  # simulate not installed
+    with pytest.raises(RuntimeError, match="pip install wandb"):
+        Tracker("wandb")
+
+
+@pytest.mark.parametrize("backend", ["wandb", "mlflow"])
+def test_tracker_logs_through_backend_and_train_uses_it(backend, monkeypatch, tmp_path, windows):
+    import sys
+    import types
+
+    from cftraj.tracking import Tracker
+
+    calls = []
+    mod = types.ModuleType(backend)
+    run = types.SimpleNamespace(summary=types.SimpleNamespace(
+        update=lambda v: calls.append(("summary", v))),
+        finish=lambda: calls.append(("finish",)))
+    mod.init = lambda **kw: calls.append(("init", kw["config"])) or run
+    mod.log = lambda m, step=None: calls.append(("log", step))
+    mod.set_experiment = lambda p: calls.append(("exp", p))
+    mod.start_run = lambda run_name=None: calls.append(("start", run_name))
+    mod.log_params = lambda p: calls.append(("params", sorted(p)))
+    mod.log_metrics = lambda m, step=None: calls.append(("log", step))
+    mod.end_run = lambda: calls.append(("finish",))
+    monkeypatch.setitem(sys.modules, backend, mod)
+
+    tracker = Tracker(backend, run_name="r", params={"epochs": 2, "skip": None})
+    train_model("transformer", windows, windows, tmp_path / "t.pt", epochs=2, batch_size=16,
+                device="cpu", log_every=99, tracker=tracker, **SMALL)
+    tracker.finish()
+    kinds = [c[0] for c in calls]
+    assert kinds.count("log") >= 2 and kinds[-1] == "finish"
+    assert ("init", {"epochs": 2}) in calls or ("params", ["epochs"]) in calls
+
+
+def _write_ethucy(root, scenes=("a", "b")):
+    rng = np.random.default_rng(0)
+    for scene in scenes:
+        for split in ("train", "val", "test"):
+            d = root / scene / split
+            d.mkdir(parents=True)
+            rows = []
+            for pid in range(1, 6):
+                x0, y0 = rng.uniform(0, 10, 2)
+                vx, vy = rng.uniform(-0.3, 0.3, 2)
+                for k in range(30):  # frames 10 apart, 2.5 Hz like the real files
+                    rows.append(f"{780 + 10 * k}\t{pid}.0\t{x0 + vx * k:.3f}\t{y0 + vy * k:.3f}")
+            (d / f"{scene}_{split}.txt").write_text("\n".join(rows) + "\n")
+
+
+def test_ethucy_parse_and_windows(tmp_path):
+    from cftraj.ethucy import load_scene_split, parse_ethucy_file
+
+    _write_ethucy(tmp_path)
+    tracks = parse_ethucy_file(tmp_path / "a" / "train" / "a_train.txt")
+    assert sorted(tracks) == [1, 2, 3, 4, 5]
+    assert [t[0] for t in tracks[1]][:3] == [0, 1, 2]  # frames re-indexed to steps
+    w = load_scene_split(tmp_path, "a", "train")
+    assert w.past_len == 8 and w.future_len == 12 and len(w) == 5 * (30 - 20 + 1)
+    assert w.nmask.any()  # pedestrians see each other
+    with pytest.raises(FileNotFoundError):
+        load_scene_split(tmp_path, "zzz", "train")
+
+
+def test_ethucy_cli_end_to_end(tmp_path, capsys):
+    _write_ethucy(tmp_path / "eu")
+    out = tmp_path / "eu.md"
+    main(["ethucy", "--root", str(tmp_path / "eu"), "--scenes", "a", "b", "--epochs", "1",
+          "--device", "cpu", "--out", str(out)])
+    text = out.read_text(encoding="utf-8")
+    assert "ETH/UCY" in text and "social + ridge prior (no context)" in text
+    assert "| a | b | Average |" in text.replace("| Method | ", "| ")

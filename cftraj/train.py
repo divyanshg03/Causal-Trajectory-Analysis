@@ -9,6 +9,7 @@ import torch
 
 from . import baselines
 from .metrics import ade_fde, min_ade_fde
+from .tracking import Tracker
 from .model import build_model, predict_modes_numpy, predict_windows, save_checkpoint
 
 
@@ -66,7 +67,7 @@ def multimodal_loss(modes, logits, true, cls_weight=0.1):
 
 def train_model(arch, train_w, val_w, out_path, epochs=60, batch_size=256, lr=1e-3,
                 weight_decay=1e-4, patience=10, seed=0, device="auto", log_every=1,
-                augment=True, speed_aug=None, amp=False, run_args=None, **model_kwargs):
+                augment=True, speed_aug=None, amp=False, run_args=None, tracker=None, **model_kwargs):
     """Mini-batch AdamW training with best-validation-ADE checkpointing.
 
     ``amp`` enables mixed precision on CUDA (ignored on CPU). ``run_args`` (e.g. the CLI
@@ -91,6 +92,7 @@ def train_model(arch, train_w, val_w, out_path, epochs=60, batch_size=256, lr=1e
             else:
                 torch.nn.init.zeros_(layer.weight)
             torch.nn.init.zeros_(layer.bias)
+    tracker = tracker or Tracker()
     amp = bool(amp) and device.startswith("cuda")
     scaler = (torch.amp.GradScaler("cuda", enabled=amp) if hasattr(torch.amp, "GradScaler")
               else torch.cuda.amp.GradScaler(enabled=amp))  # torch < 2.3
@@ -155,6 +157,8 @@ def train_model(arch, train_w, val_w, out_path, epochs=60, batch_size=256, lr=1e
         history["train_loss"].append(total / len(X))
         history["val_ade"].append(val_ade)
         history["val_fde"].append(val_fde)
+        tracker.log({"train_loss": total / len(X), "val_ade": val_ade, "val_fde": val_fde},
+                    step=epoch)
         if epoch % log_every == 0:
             print(f"  epoch {epoch:3d}  train ADE {total / len(X):.3f}  "
                   f"val ADE {val_ade:.3f}  val FDE {val_fde:.3f}")
@@ -175,6 +179,7 @@ def train_model(arch, train_w, val_w, out_path, epochs=60, batch_size=256, lr=1e
         )
     model.load_state_dict(best_state)
     history.update(best_epoch=best_epoch, best_val_ade=best_ade)
+    tracker.summary({"best_epoch": best_epoch, "best_val_ade": best_ade})
     save_checkpoint(out_path, model, arch, config, extra={"seed": seed})
     with open(f"{out_path}.history.json", "w") as f:
         json.dump(history, f)
