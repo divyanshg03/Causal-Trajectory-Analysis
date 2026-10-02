@@ -3,11 +3,11 @@ scene context help, and do predicted risk flags match real near-misses?"""
 
 import numpy as np
 
-from .counterfactual import scale_speed
+from .counterfactual import apply_intervention, is_plausible, scale_speed
 from .metrics import ade_fde
 from .model import predict_numpy, predict_windows
-from .pairs import all_pairs
-from .risk import assess_pair
+from .pairs import all_pairs, neighbors_with_replaced
+from .risk import assess_pair, calibrate_ttc_threshold, tier_reliability
 
 SPEED_FACTORS = (0.0, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 CONFLICT_RADIUS = 3.0  # meters between centers inside the horizon = conflict
@@ -93,3 +93,76 @@ def conflict_metrics(w, pred, pairs=None, radius=CONFLICT_RADIUS):
         out[name] = {"precision": p, "recall": r,
                      "f1": 2 * p * r / (p + r) if p + r else 0.0}
     return out
+
+
+def _conflict_pairs(w, radius=CONFLICT_RADIUS):
+    """Not-yet-close co-occurring pairs and whether their true futures conflict."""
+    pairs = all_pairs(w, PAIR_RADIUS)
+    current = np.linalg.norm(w.X[pairs[:, 0], -1] - w.X[pairs[:, 1], -1], axis=-1)
+    pairs = pairs[current >= radius]
+    i, j = pairs[:, 0], pairs[:, 1]
+    truth = np.linalg.norm(w.Y[i] - w.Y[j], axis=-1).min(axis=1) < radius
+    return pairs, truth
+
+
+def risk_calibration(w, pred, radius=CONFLICT_RADIUS):
+    """Are the heuristic risk tiers meaningful, and what TTC cut-off would be best?
+
+    Returns the per-tier reliability table (how often a real conflict followed each
+    tier), the F1 of the shipped ``MEDIUM``-or-worse rule, and the TTC threshold
+    that maximises F1 on these pairs (compare it with the 5 s MEDIUM bound). The
+    threshold is fit on the data it is scored on, so treat it as a diagnostic;
+    fit it on validation windows before reporting it on test.
+    """
+    pairs, truth = _conflict_pairs(w, radius)
+    if len(pairs) == 0 or not truth.any():
+        return {"n_pairs": len(pairs), "n_positive": int(truth.sum())}
+    reports = [assess_pair(pred[a], pred[b]) for a, b in pairs]
+    ttc = np.array([r["ttc_s"] for r in reports])
+    labels = [r["risk"] for r in reports]
+    threshold, f1 = calibrate_ttc_threshold(ttc, truth)
+    flagged = np.isin(labels, FLAGGED)
+    tp = int((flagged & truth).sum())
+    default_f1 = 2 * tp / (2 * tp + int((flagged & ~truth).sum()) + int((~flagged & truth).sum()))
+    return {"n_pairs": len(pairs), "n_positive": int(truth.sum()),
+            "reliability": tier_reliability(labels, truth),
+            "default_f1": default_f1, "best_ttc_threshold_s": threshold, "best_f1": f1}
+
+
+def intervention_plausibility(w, kind="speed", value=2.0, n=2000, seed=0):
+    """Fraction of real histories that remain physically plausible (acceleration under
+    the limit) after the intervention; low values mean the counterfactual is out of
+    distribution for that kind/value, and its predictions should not be trusted."""
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(w), size=min(n, len(w)), replace=False)
+    base = is_plausible(w.X[idx])
+    cf = is_plausible(apply_intervention(w.X[idx], kind, value))
+    return {"kind": kind, "value": value, "n": len(idx),
+            "plausible_before": float(base.mean()), "plausible_after": float(cf.mean())}
+
+
+def neighbor_reaction(model, w, factor=2.0, device="cpu", n_pairs=2000, seed=0):
+    """How much does agent B's predicted future move when A's past speed is scaled?
+
+    Only meaningful for social models. A sensible reaction is small overall and larger
+    for close pairs than for distant ones. Returns mean / 95th-percentile reaction
+    (m, at the final step) and the means for pairs under 5 m and over 10 m apart.
+    """
+    if not model.uses_neighbors:
+        return None
+    pairs = all_pairs(w, PAIR_RADIUS)
+    if len(pairs) == 0:
+        return {"n_pairs": 0}
+    rng = np.random.default_rng(seed)
+    pairs = pairs[rng.choice(len(pairs), size=min(n_pairs, len(pairs)), replace=False)]
+    i, j = pairs[:, 0], pairs[:, 1]
+    nbr_cf = neighbors_with_replaced(w, pairs, scale_speed(w.X[i], factor))
+    base = predict_numpy(model, w.X[j], device, nbr=w.nbr[j], nmask=w.nmask[j])
+    cf = predict_numpy(model, w.X[j], device, nbr=nbr_cf, nmask=w.nmask[j])
+    shift = np.linalg.norm(cf[:, -1] - base[:, -1], axis=-1)
+    dist = np.linalg.norm(w.X[i, -1] - w.X[j, -1], axis=-1)
+    near, far = dist < 5.0, dist > 10.0
+    return {"n_pairs": len(pairs), "mean_m": float(shift.mean()),
+            "p95_m": float(np.quantile(shift, 0.95)),
+            "mean_near_m": float(shift[near].mean()) if near.any() else None,
+            "mean_far_m": float(shift[far].mean()) if far.any() else None}

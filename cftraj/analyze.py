@@ -3,9 +3,10 @@
 import numpy as np
 import torch
 
-from .counterfactual import apply_intervention
-from .pairs import all_pairs, find_interacting_pair
-from .risk import RISK_ORDER, build_scene_graph, explain
+from .counterfactual import apply_intervention, is_plausible, max_acceleration
+from .model import predict_numpy, sample_numpy
+from .pairs import all_pairs, find_interacting_pair, neighbors_with_replaced
+from .risk import RISK_ORDER, assess_pair, build_scene_graph, explain, risk_distribution
 
 
 @torch.no_grad()
@@ -34,12 +35,16 @@ def _replace_neighbor(nbr, ntids, tid, new_past):
 
 
 def analyze_pair(model, windows, kind="speed", value=2.0, max_distance=None, pair=None,
-                 mask_neighbors=False):
+                 mask_neighbors=False, n_samples=0):
     """Compare predicted risk with and without an intervention on agent A.
 
     The intervention rewrites A's observed past. For a social model, B sees the
     intervened A as a neighbor, so both predictions react. With
-    ``mask_neighbors`` the model is run without any scene context.
+    ``mask_neighbors`` the model is run without any scene context. With
+    ``n_samples > 0`` the result also carries ``uncertainty`` (see
+    :func:`cftraj.risk.risk_distribution`) for both scenarios, estimated from
+    sampled futures (mode sampling or MC dropout). ``plausible`` says whether
+    the intervened history stays under the acceleration limit.
     Returns ``None`` if the windows contain no co-occurring pair.
     """
     pair = pair if pair is not None else find_interacting_pair(windows, max_distance)
@@ -75,33 +80,67 @@ def analyze_pair(model, windows, kind="speed", value=2.0, max_distance=None, pai
         "pred_a": pred_a, "pred_b": pred_b,
         "cf_pred_a": cf_a, "cf_pred_b": cf_b,
         "attention_a": attn_a, "attention_b": attn_b,
+        "plausible": bool(is_plausible(past_a_cf)),
+        "max_accel_cf_mps2": float(max_acceleration(past_a_cf)),
     }
     for key, (a, b) in (("original", (pred_a, pred_b)), ("counterfactual", (cf_a, cf_b))):
         scene = build_scene_graph(a, b)
         result[key] = {"scene": scene, "risk": scene["risk"], "explanation": explain(scene)}
+    if n_samples > 0:
+        def draw(past, nbr, nm):
+            return sample_numpy(model, past[None], n_samples, nbr=None if nbr is None else nbr[None],
+                                nmask=None if nm is None else nm[None])[:, 0]
+        result["uncertainty"] = {
+            "original": risk_distribution(draw(past_a, nbr_a, nm_a), draw(past_b, nbr_b, nm_b)),
+            "counterfactual": risk_distribution(draw(past_a_cf, nbr_a, nm_a),
+                                                draw(past_b, nbr_b_cf, nm_b)),
+        }
     return result
 
 
 def find_escalation(model, windows, kind="speed", value=2.0, max_pair_distance=15.0,
-                    mask_neighbors=False):
+                    mask_neighbors=False, n_samples=0):
     """Search all nearby co-occurring pairs for the intervention that raises risk the most.
 
-    Returns the :func:`analyze_pair` result with the largest risk-tier increase
-    (ties broken by the largest drop in closest approach), or ``None`` if the
-    intervention never raises any pair's risk.
+    Predictions for every pair are made in a few batched calls (not pair by
+    pair). Returns the :func:`analyze_pair` result with the largest risk-tier
+    increase (ties broken by the largest drop in closest approach), or ``None``
+    if the intervention never raises any pair's risk.
     """
+    pairs = all_pairs(windows, max_pair_distance)
+    if len(pairs) == 0:
+        return None
+    i, j = pairs[:, 0], pairs[:, 1]
+    use_ctx = model.uses_neighbors and windows.nbr is not None
+    nbr_a = nbr_b = nm_a = nm_b = nbr_b_cf = None
+    if use_ctx:
+        nbr_a, nbr_b = windows.nbr[i], windows.nbr[j]
+        nm_a, nm_b = windows.nmask[i], windows.nmask[j]
+        if mask_neighbors:
+            nm_a, nm_b = np.zeros_like(nm_a), np.zeros_like(nm_b)
+    past_a_cf = apply_intervention(windows.X[i], kind, value)
+    if use_ctx:
+        nbr_b_cf = neighbors_with_replaced(windows, pairs, past_a_cf)
+
+    def run(past, nbr, nm):
+        return predict_numpy(model, past, nbr=nbr, nmask=nm)
+
+    pred_a, pred_b = run(windows.X[i], nbr_a, nm_a), run(windows.X[j], nbr_b, nm_b)
+    cf_a, cf_b = run(past_a_cf, nbr_a, nm_a), run(windows.X[j], nbr_b_cf, nm_b)
+
     best, best_key = None, None
-    for i, j in all_pairs(windows, max_pair_distance):
-        res = analyze_pair(model, windows, kind, value, pair=(int(i), int(j)),
-                           mask_neighbors=mask_neighbors)
-        o, c = res["original"]["scene"], res["counterfactual"]["scene"]
+    for n in range(len(pairs)):
+        o, c = assess_pair(pred_a[n], pred_b[n]), assess_pair(cf_a[n], cf_b[n])
         jump = RISK_ORDER.index(c["risk"]) - RISK_ORDER.index(o["risk"])
         if jump <= 0:
             continue
         key = (jump, o["min_distance_m"] - c["min_distance_m"])
         if best_key is None or key > best_key:
-            best, best_key = res, key
-    return best
+            best, best_key = n, key
+    if best is None:
+        return None
+    return analyze_pair(model, windows, kind, value, pair=(int(i[best]), int(j[best])),
+                        mask_neighbors=mask_neighbors, n_samples=n_samples)
 
 
 def print_report(res):
@@ -126,6 +165,15 @@ def print_report(res):
     print("\n--- Explanation ---")
     print(res["original"]["explanation"])
     print(res["counterfactual"]["explanation"])
+    if not res.get("plausible", True):
+        print(f"\nWarning: the intervened history needs {res['max_accel_cf_mps2']:.1f} m/s^2 "
+              "(unphysical); treat the counterfactual prediction with caution.")
+    if "uncertainty" in res:
+        print("\n--- Uncertainty (sampled futures) ---")
+        for key in ("original", "counterfactual"):
+            u = res["uncertainty"][key]
+            print(f"{key:15s} P(overlap)={u['p_overlap']:.2f}  P(MEDIUM+)={u['p_flagged']:.2f}  "
+                  f"median TTC={u['ttc_median_s']:.1f} s  (n={u['n_samples']})")
 
 
 def figure_result(res):

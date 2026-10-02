@@ -7,10 +7,18 @@ import numpy as np
 
 from . import baselines
 from .data import KITTI_FPS, load_split, split_label
-from .metrics import ade_fde, error_by_horizon
-from .model import load_model, predict_windows
+from .metrics import ade_fde, bootstrap_ci, displacement_errors, error_by_horizon, min_ade_fde
+from .model import load_model, predict_modes_numpy, predict_windows
+from .risk import RISK_ORDER
 from .train import pick_device
-from .validity import conflict_metrics, context_ablation, speed_response
+from .validity import (
+    conflict_metrics,
+    context_ablation,
+    intervention_plausibility,
+    neighbor_reaction,
+    risk_calibration,
+    speed_response,
+)
 
 
 def parse_ckpt_specs(specs):
@@ -34,20 +42,31 @@ def _pct(vals):
     return _fmt(np.asarray(vals) * 100, 1)
 
 
-def run_evaluation(label_dir, ckpts, out_dir="docs", device="auto"):
+def run_evaluation(label_dir, ckpts, out_dir="docs", device="auto", cache_dir=None):
+    """Benchmark every checkpoint group; checkpoints of different horizons are evaluated
+    in separate passes (each writes its own ``results_h<F>`` files)."""
     device = pick_device(device)
     models = {name: [load_model(p, device) for p in paths] for name, paths in ckpts.items()}
-    lens = {(m.past_len, m.future_len) for ms in models.values() for m in ms}
-    if len(lens) != 1:
-        raise ValueError(
-            f"All checkpoints must share (past_len, future_len); got {sorted(lens)}. "
-            "Evaluate each horizon separately."
-        )
-    past_len, future_len = lens.pop()
+    by_len = {}
+    for name, ms in models.items():
+        lens = {(m.past_len, m.future_len) for m in ms}
+        if len(lens) != 1:
+            raise ValueError(f"Checkpoints of '{name}' mix horizons {sorted(lens)}; "
+                             "list one model per horizon.")
+        by_len.setdefault(lens.pop(), {})[name] = ms
+    out = {}
+    for (past_len, future_len), group in sorted(by_len.items(), key=lambda kv: kv[0][1]):
+        group_ckpts = {name: ckpts[name] for name in group}
+        out[future_len] = _evaluate_horizon(label_dir, group_ckpts, group, past_len, future_len,
+                                            out_dir, device, cache_dir)
+    return out if len(out) > 1 else next(iter(out.values()))
 
-    train = load_split(label_dir, "train", past_len, future_len)
-    val = load_split(label_dir, "val", past_len, future_len)
-    test = load_split(label_dir, "test", past_len, future_len)
+
+def _evaluate_horizon(label_dir, ckpts, models, past_len, future_len, out_dir, device,
+                      cache_dir=None):
+    train = load_split(label_dir, "train", past_len, future_len, cache_dir)
+    val = load_split(label_dir, "val", past_len, future_len, cache_dir)
+    test = load_split(label_dir, "test", past_len, future_len, cache_dir)
     print(f"windows: train {len(train):,}  val {len(val):,}  test {len(test):,}")
 
     q, r = baselines.tune_kalman(val.X, val.Y)
@@ -73,17 +92,35 @@ def run_evaluation(label_dir, ckpts, out_dir="docs", device="auto"):
             fdes.append(fde)
             hz.append(error_by_horizon(p, test.Y))
             conf.append(conflict_metrics(test, p))
+        # 95% CI of the (seed-averaged) ADE, resampling whole tracks (windows of a track
+        # are strongly correlated)
+        per_window = np.mean([displacement_errors(p, test.Y).mean(1) for p in plist], axis=0)
+        ci = bootstrap_ci(per_window, groups=test.seqs * 10**6 + test.tids)
         results[name] = {"ade": ades, "fde": fdes, "by_horizon": np.mean(hz, axis=0).tolist(),
-                         "conflict": conf}
+                         "conflict": conf, "ade_ci95": list(ci[1:])}
+    for name, ms in models.items():
+        if ms[0].n_modes > 1:  # best-of-K metrics for multi-modal models
+            mins = []
+            for m in ms:
+                futs, _ = predict_modes_numpy(m, test.X, device, nbr=test.nbr, nmask=test.nmask)
+                mins.append(min_ade_fde(futs, test.Y))
+            results[name]["min_ade"] = [v[0] for v in mins]
+            results[name]["min_fde"] = [v[1] for v in mins]
+            results[name]["n_modes"] = ms[0].n_modes
 
     validity = {}
     for name, ms in models.items():
         validity[name] = {
             "speed_response": [speed_response(m, test, device) for m in ms],
             "context": [context_ablation(m, test, device) for m in ms],
+            "neighbor_reaction": [neighbor_reaction(m, test, device=device) for m in ms],
+            "calibration": [risk_calibration(test, predict_windows(m, test, device))
+                            for m in ms],
         }
+    plaus = [intervention_plausibility(test, k, v)
+             for k, v in (("speed", 2.0), ("speed", 0.5), ("brake", 0.8), ("lateral", 3.0))]
 
-    text = _render(results, validity, test, past_len, future_len)
+    text = _render(results, validity, test, past_len, future_len, plaus)
     print("\n" + text)
 
     out = Path(out_dir)
@@ -92,7 +129,7 @@ def run_evaluation(label_dir, ckpts, out_dir="docs", device="auto"):
     (out / f"results_{tag}.md").write_text(text + "\n", encoding="utf-8")
     (out / f"results_{tag}.json").write_text(
         json.dumps({"n_test": len(test), "kalman": {"q": q, "r": r}, "results": results,
-                    "validity": validity}, indent=2),
+                    "validity": validity, "plausibility": plaus}, indent=2),
         encoding="utf-8",
     )
     _plot_horizon(results, future_len, out / f"error_by_horizon_{tag}.png")
@@ -101,7 +138,7 @@ def run_evaluation(label_dir, ckpts, out_dir="docs", device="auto"):
     return results, validity
 
 
-def _render(results, validity, test, past_len, future_len):
+def _render(results, validity, test, past_len, future_len, plaus=()):
     horizon_s = future_len / KITTI_FPS
     n_pairs = results["Stationary"]["conflict"][0]["n_pairs"]
     n_pos = results["Stationary"]["conflict"][0]["n_positive"]
@@ -113,11 +150,20 @@ def _render(results, validity, test, past_len, future_len):
          "Errors in meters (bird's-eye view, ego-camera frame). Learned models: mean ± std "
          "over seeds."),
         "",
-        "| Model | ADE (m) | FDE (m) |",
-        "|---|---|---|",
+        "| Model | ADE (m) | ADE 95% CI | FDE (m) |",
+        "|---|---|---|---|",
     ]
     for name, res in results.items():
-        lines.append(f"| {name} | {_fmt(res['ade'])} | {_fmt(res['fde'])} |")
+        lo, hi = res["ade_ci95"]
+        lines.append(f"| {name} | {_fmt(res['ade'])} | [{lo:.3f}, {hi:.3f}] | "
+                     f"{_fmt(res['fde'])} |")
+    multi = {n: r for n, r in results.items() if "min_ade" in r}
+    if multi:
+        lines += ["", "**Multi-modal models** (best of K modes per window):", "",
+                  "| Model | K | minADE (m) | minFDE (m) |", "|---|---|---|---|"]
+        for name, r in multi.items():
+            lines.append(f"| {name} | {r['n_modes']} | {_fmt(r['min_ade'])} | "
+                         f"{_fmt(r['min_fde'])} |")
 
     lines += [
         "",
@@ -163,6 +209,43 @@ def _render(results, validity, test, past_len, future_len):
                     f"{_fmt([x['ade_no_context'] for x in c])} | "
                     f"{_fmt([x['fde'] for x in c])} | {_fmt([x['fde_no_context'] for x in c])} |"
                 )
+        react = {n: v["neighbor_reaction"] for n, v in validity.items()
+                 if v["neighbor_reaction"][0] is not None}
+        if react:
+            lines += ["", ("**Neighbor reaction** - shift of B's predicted final position (m) "
+                           "when A's past speed is doubled; should shrink with distance:"), "",
+                      "| Model | Mean | 95th pct | Pairs < 5 m | Pairs > 10 m |",
+                      "|---|---|---|---|---|"]
+            for name, rs in react.items():
+                def col(key, rs=rs):
+                    vals = [r[key] for r in rs if r.get(key) is not None]
+                    return _fmt(vals, 3) if vals else "n/a"
+                lines.append(f"| {name} | {col('mean_m')} | {col('p95_m')} | "
+                             f"{col('mean_near_m')} | {col('mean_far_m')} |")
+        lines += ["", ("**Risk-tier calibration** - fraction of pairs followed by a real "
+                       "conflict (true future gap < 3 m), per predicted tier:"), "",
+                  "| Model | " + " | ".join(RISK_ORDER) + " | F1 (MEDIUM+) | best TTC cut-off |",
+                  "|---|" + "---|" * (len(RISK_ORDER) + 2)]
+        for name, v in validity.items():
+            cals = [c for c in v["calibration"] if "reliability" in c]
+            if not cals:
+                continue
+            cells = []
+            for tier in RISK_ORDER:
+                rates = [c["reliability"][tier]["conflict_rate"] for c in cals
+                         if c["reliability"][tier]["conflict_rate"] is not None]
+                cells.append(_pct(rates) + "%" if rates else "n/a")
+            lines.append(
+                f"| {name} | " + " | ".join(cells) + " | "
+                f"{_pct([c['default_f1'] for c in cals])}% | "
+                f"{_fmt([c['best_ttc_threshold_s'] for c in cals], 1)} s |")
+    if plaus:
+        lines += ["", ("**Intervention plausibility** - share of real test histories that stay "
+                       "under 10 m/s^2 after the intervention:"), "",
+                  "| Intervention | Before | After |", "|---|---|---|"]
+        for p in plaus:
+            lines.append(f"| {p['kind']} = {p['value']} | {p['plausible_before'] * 100:.1f}% | "
+                         f"{p['plausible_after'] * 100:.1f}% |")
     return "\n".join(lines)
 
 

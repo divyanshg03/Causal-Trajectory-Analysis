@@ -118,3 +118,64 @@ def explain(scene):
         f"{a} is {verb} {b} (closest approach {scene['min_distance_m']:.1f} m). "
         f"Risk: {scene['risk']}."
     )
+
+
+def risk_distribution(samples_a, samples_b, fps=KITTI_FPS, radius=COLLISION_RADIUS):
+    """Risk under prediction uncertainty from ``S`` sampled futures per agent.
+
+    ``samples_a`` / ``samples_b`` are ``(S, T, 2)`` (sample ``s`` of A is paired
+    with sample ``s`` of B). Returns the probability of a predicted overlap
+    (gap < ``radius``), of MEDIUM-or-worse risk, the mean/quantile TTC and the
+    fraction of samples in each tier.
+    """
+    reports = [assess_pair(a, b, fps, radius) for a, b in zip(samples_a, samples_b)]
+    ttc = np.array([r["ttc_s"] for r in reports])
+    labels = [r["risk"] for r in reports]
+    overlap = np.array([r["min_distance_m"] < radius for r in reports])
+    return {
+        "n_samples": len(reports),
+        "p_overlap": float(overlap.mean()),
+        "p_flagged": float(np.mean([RISK_ORDER.index(lab) >= RISK_ORDER.index("MEDIUM")
+                                    for lab in labels])),
+        "ttc_median_s": float(np.quantile(ttc, 0.5, method="lower")),
+        "ttc_p10_s": float(np.quantile(ttc, 0.1, method="lower")),
+        "tier_fractions": {t: float(np.mean([lab == t for lab in labels])) for t in RISK_ORDER},
+    }
+
+
+def calibrate_ttc_threshold(ttc, truth, candidates=None):
+    """TTC threshold (s) that maximises F1 for flagging real conflicts.
+
+    ``ttc`` are predicted TTCs (inf allowed) and ``truth`` booleans. Returns
+    ``(threshold, f1)``; a pair is flagged when ``ttc < threshold``.
+    """
+    ttc = np.asarray(ttc, dtype=float)
+    truth = np.asarray(truth, dtype=bool)
+    if candidates is None:
+        candidates = np.arange(0.5, 10.01, 0.5)
+    best_t, best_f1 = float(candidates[0]), -1.0
+    for t in candidates:
+        flag = ttc < t
+        tp = int((flag & truth).sum())
+        fp = int((flag & ~truth).sum())
+        fn = int((~flag & truth).sum())
+        f1 = 2 * tp / (2 * tp + fp + fn) if tp + fp + fn else 0.0
+        if f1 > best_f1:
+            best_t, best_f1 = float(t), f1
+    return best_t, best_f1
+
+
+def tier_reliability(labels, truth):
+    """Reliability table: for each tier, how often a real conflict followed it.
+
+    Returns ``{tier: {"n": count, "conflict_rate": fraction or None}}``. A
+    useful tiering has a conflict rate that increases with severity.
+    """
+    labels = np.asarray(labels)
+    truth = np.asarray(truth, dtype=bool)
+    out = {}
+    for tier in RISK_ORDER:
+        sel = labels == tier
+        out[tier] = {"n": int(sel.sum()),
+                     "conflict_rate": float(truth[sel].mean()) if sel.any() else None}
+    return out

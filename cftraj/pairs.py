@@ -40,3 +40,27 @@ def all_pairs(windows, max_distance=15.0):
         a, b = np.nonzero(np.triu(d <= max_distance, k=1))
         out.extend(zip(idx[a].tolist(), idx[b].tolist()))
     return np.array(out, dtype=np.int64).reshape(-1, 2)
+
+
+def neighbor_slots(windows, pairs):
+    """For each pair ``(i, j)``, the slot of agent ``i`` among window ``j``'s neighbors.
+
+    ``-1`` where ``i`` is not among ``j``'s (nearest ``K``) neighbors.
+    """
+    pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
+    match = windows.ntids[pairs[:, 1]] == windows.tids[pairs[:, 0]][:, None]  # (n, K)
+    return np.where(match.any(axis=1), match.argmax(axis=1), -1)
+
+
+def neighbors_with_replaced(windows, pairs, new_pasts):
+    """``nbr`` rows of each pair's second window, with agent ``i``'s slot showing ``new_pasts``.
+
+    ``new_pasts`` is ``(n, P, 2)``. Pairs where ``i`` is not a neighbor are
+    returned unchanged. Output ``(n, K, P, 2)``.
+    """
+    pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
+    nbr = windows.nbr[pairs[:, 1]].copy()
+    slots = neighbor_slots(windows, pairs)
+    ok = np.flatnonzero(slots >= 0)
+    nbr[ok, slots[ok]] = new_pasts[ok]
+    return nbr
