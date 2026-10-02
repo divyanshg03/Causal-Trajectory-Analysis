@@ -8,8 +8,10 @@ ego-camera frame of each frame (no OXTS ego-motion compensation), which keeps
 speed, TTC) physically meaningful.
 """
 
-from dataclasses import dataclass
+import hashlib
+from dataclasses import dataclass, fields
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -92,9 +94,9 @@ class Windows:
     tids: np.ndarray  # (N,)
     starts: np.ndarray  # (N,)
     seqs: np.ndarray  # (N,)
-    nbr: np.ndarray = None  # (N, K, past_len, 2)
-    nmask: np.ndarray = None  # (N, K) bool
-    ntids: np.ndarray = None  # (N, K) int, -1 for padding
+    nbr: Optional[np.ndarray] = None  # (N, K, past_len, 2)
+    nmask: Optional[np.ndarray] = None  # (N, K) bool
+    ntids: Optional[np.ndarray] = None  # (N, K) int, -1 for padding
 
     def __len__(self):
         return len(self.X)
@@ -180,26 +182,101 @@ def concat_windows(parts):
     return Windows(**fields)
 
 
-def load_windows(label_path, past_len=10, future_len=10, seq=0, neighbors=True):
-    """One label file -> :class:`Windows` (with neighbors unless disabled)."""
+_WINDOW_FIELDS = tuple(f.name for f in fields(Windows))
+
+
+def _cache_path(cache_dir, label_path, past_len, future_len, seq, neighbors):
+    st = Path(label_path).stat()
+    key = "|".join(map(str, (Path(label_path).resolve(), st.st_mtime_ns, st.st_size, past_len,
+                             future_len, seq, neighbors, N_NEIGHBORS, NEIGHBOR_RADIUS)))
+    return Path(cache_dir) / f"windows_{hashlib.sha1(key.encode()).hexdigest()[:16]}.npz"
+
+
+def _save_windows(path, w):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, **{f: getattr(w, f) for f in _WINDOW_FIELDS if getattr(w, f) is not None})
+
+
+def _load_cached(path):
+    with np.load(path) as z:
+        return Windows(**{f: (z[f] if f in z.files else None) for f in _WINDOW_FIELDS})
+
+
+def load_windows(label_path, past_len=10, future_len=10, seq=0, neighbors=True, cache_dir=None):
+    """One label file -> :class:`Windows` (with neighbors unless disabled).
+
+    With ``cache_dir`` the (slow) neighbor search is cached as ``.npz``; the key covers
+    the file's path, size and mtime plus every parameter, so edits invalidate it.
+    """
     if not Path(label_path).is_file():
         raise FileNotFoundError(
             f"Label file not found: {label_path}. See 'Dataset setup' in the README."
         )
+    cache = None
+    if cache_dir is not None:
+        cache = _cache_path(cache_dir, label_path, past_len, future_len, seq, neighbors)
+        if cache.is_file():
+            try:
+                return _load_cached(cache)
+            except (OSError, ValueError, KeyError):
+                pass  # corrupt cache: rebuild
     traj = clean_trajectories(
         build_trajectories(parse_kitti_labels(label_path)), min_length=past_len + future_len
     )
     w = create_windows(traj, past_len, future_len, seq=seq)
-    return attach_neighbors(w) if neighbors else w
+    w = attach_neighbors(w) if neighbors else w
+    if cache is not None:
+        _save_windows(cache, w)
+    return w
 
 
-def load_split(label_dir, split, past_len=10, future_len=10):
+def load_split(label_dir, split, past_len=10, future_len=10, cache_dir=None):
     """All sequences of ``split`` ('train' | 'val' | 'test') -> :class:`Windows`."""
+    return load_sequences(label_dir, SPLITS[split], past_len, future_len, cache_dir)
+
+
+def load_sequences(label_dir, seqs, past_len=10, future_len=10, cache_dir=None):
+    """Windows of the given KITTI sequence ids, concatenated."""
     parts = [
-        load_windows(Path(label_dir) / f"{s:04d}.txt", past_len, future_len, seq=s)
-        for s in SPLITS[split]
+        load_windows(Path(label_dir) / f"{s:04d}.txt", past_len, future_len, seq=s,
+                     cache_dir=cache_dir)
+        for s in seqs
     ]
     return concat_windows(parts)
+
+
+def kfold_sequences(k=5, seqs=None):
+    """Deterministic sequence-level folds: ``[(train_seqs, test_seqs), ...]``.
+
+    ``seqs`` defaults to all 21 KITTI tracking training sequences; folds are
+    interleaved (every k-th sequence) so each mixes early and late recordings.
+    """
+    seqs = list(range(21)) if seqs is None else list(seqs)
+    if not 2 <= k <= len(seqs):
+        raise ValueError(f"k must be between 2 and {len(seqs)}")
+    folds = [seqs[i::k] for i in range(k)]
+    return [([s for s in seqs if s not in test], test) for test in folds]
+
+
+def load_csv_trajectories(path):
+    """Tracks from a generic CSV so other datasets can be plugged in.
+
+    Columns (header required): ``seq,frame,track,x,y`` in meters (BEV). Returns
+    ``{seq: {track_id: [(frame, x, y), ...]}}`` ready for
+    :func:`clean_trajectories` / :func:`create_windows` (one call per sequence).
+    """
+    import csv
+
+    out = {}
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        missing = {"seq", "frame", "track", "x", "y"} - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"{path} is missing columns: {sorted(missing)}")
+        for row in reader:
+            out.setdefault(int(row["seq"]), {}).setdefault(int(row["track"]), []).append(
+                (int(row["frame"]), float(row["x"]), float(row["y"])))
+    return out
 
 
 def load_kitti_frames(image_folder):

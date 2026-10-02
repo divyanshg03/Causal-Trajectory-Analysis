@@ -1,8 +1,10 @@
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
 
+from . import __version__
 from .analyze import analyze_pair, find_escalation, plot_result, print_report
 from .counterfactual import INTERVENTIONS
 from .data import load_split, load_windows
@@ -20,8 +22,27 @@ def seq_from_path(path):
     return int(m.group()) if m else 0
 
 
+def load_config(path):
+    """Read run options from a ``.json`` (or ``.yaml``/``.yml``, needs PyYAML) file."""
+    text = Path(path).read_text(encoding="utf-8")
+    if Path(path).suffix.lower() in (".yaml", ".yml"):
+        try:
+            import yaml
+        except ImportError as err:
+            raise ValueError("YAML configs need PyYAML (pip install pyyaml)") from err
+        cfg = yaml.safe_load(text)
+    else:
+        cfg = json.loads(text)
+    if not isinstance(cfg, dict):
+        raise ValueError(f"{path} must contain a mapping of option names to values")
+    return {k.replace("-", "_"): v for k, v in cfg.items()}
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="cftraj")
+    p.add_argument("--version", action="version", version=f"cftraj {__version__}")
+    p.add_argument("--config", default=None,
+                   help="JSON/YAML file of option defaults (command-line flags win)")
     sub = p.add_subparsers(dest="command", required=True)
 
     t = sub.add_parser("train", help="train a trajectory predictor")
@@ -38,6 +59,10 @@ def build_parser():
                    help="start from a ridge-regression linear path and learn a correction")
     t.add_argument("--speed-aug", type=float, nargs=2, default=None, metavar=("LO", "HI"),
                    help="augment by replaying targets at a random speed factor in [LO, HI]")
+    t.add_argument("--n-modes", type=int, default=1,
+                   help="predict K trajectories (winner-takes-all training); 1 = single future")
+    t.add_argument("--amp", action="store_true", help="mixed precision (CUDA only)")
+    t.add_argument("--cache-dir", default=None, help="cache preprocessed windows here")
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--device", default="auto")
 
@@ -46,7 +71,25 @@ def build_parser():
     e.add_argument("--ckpt", action="append", required=True, metavar="NAME=PATH[,PATH...]",
                    help="learned model(s); repeat per model, comma-separate seeds")
     e.add_argument("--out-dir", default="docs")
+    e.add_argument("--cache-dir", default=None, help="cache preprocessed windows here")
     e.add_argument("--device", default="auto")
+
+    c = sub.add_parser("crossval", help="sequence-level k-fold benchmark (baselines, +1 model)")
+    c.add_argument("--label-dir", default=DEFAULT_DIR)
+    c.add_argument("--folds", type=int, default=5)
+    c.add_argument("--future-len", type=int, default=10)
+    c.add_argument("--arch", choices=sorted(ARCHS), default=None,
+                   help="also train and score this architecture in every fold")
+    c.add_argument("--epochs", type=int, default=30)
+    c.add_argument("--seed", type=int, default=0)
+    c.add_argument("--cache-dir", default=None)
+    c.add_argument("--out", default=None, help="write the markdown table here")
+    c.add_argument("--device", default="cpu")
+
+    dl = sub.add_parser("download", help="fetch the shipped checkpoints listed in MANIFEST.json")
+    dl.add_argument("--dir", default="checkpoints")
+    dl.add_argument("--base-url", default=None, help="release URL holding the .pt files")
+    dl.add_argument("--force", action="store_true")
 
     def scene_args(sp):
         sp.add_argument("--labels", default=f"{DEFAULT_DIR}/0018.txt", help="one KITTI label file")
@@ -57,13 +100,16 @@ def build_parser():
     a = sub.add_parser("analyze", help="counterfactual collision analysis on one sequence")
     scene_args(a)
     a.add_argument("--intervention", choices=INTERVENTIONS, default="speed",
-                   help="speed: scale A's past speed; lateral: drift A sideways (m)")
+                   help="speed: scale A's past speed; lateral: drift A sideways (m); "
+                        "brake: A decelerated by value in [0,1]; delay: A started value frames ago")
     a.add_argument("--value", type=float, default=2.0,
-                   help="speed factor, or lateral offset in meters")
+                   help="speed factor, lateral offset (m), brake strength or delay (frames)")
     a.add_argument("--max-distance", type=float, default=None,
                    help="reject pairs whose last observed points are farther apart (m)")
     a.add_argument("--find-escalation", action="store_true",
                    help="scan all nearby pairs for the one whose risk the intervention raises most")
+    a.add_argument("--samples", type=int, default=0,
+                   help="draw this many sampled futures to report P(overlap) / P(MEDIUM+)")
     a.add_argument("--no-context", action="store_true",
                    help="social models: ignore neighboring agents")
     a.add_argument("--save-fig", default=None, help="write the plot to this path")
@@ -92,11 +138,31 @@ def _load_scene(args):
     return model, windows, seq
 
 
+def parse_args(argv=None):
+    """Parse ``argv``; options from ``--config`` become defaults the command line overrides."""
+    argv = sys.argv[1:] if argv is None else list(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.config:
+        cfg = load_config(args.config)
+        unknown = sorted(set(cfg) - set(vars(args)))
+        if unknown:
+            raise ValueError(f"Unknown option(s) in {args.config}: {', '.join(unknown)}")
+        sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        sub.choices[args.command].set_defaults(**cfg)
+        args = parser.parse_args(argv)
+    return args
+
+
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    try:
+        args = parse_args(argv)
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as err:
+        sys.exit(str(err))
     try:
         if args.command == "train":
-            kw = {"past_len": args.past_len, "future_len": args.future_len}
+            kw = {"past_len": args.past_len, "future_len": args.future_len,
+                  "cache_dir": args.cache_dir}
             train_w = load_split(args.label_dir, "train", **kw)
             val_w = load_split(args.label_dir, "val", **kw)
             out = args.out or f"outputs/{args.arch}.pt"
@@ -104,19 +170,39 @@ def main(argv=None):
             train_model(args.arch, train_w, val_w, out, args.epochs, args.batch_size,
                         args.lr, patience=args.patience, seed=args.seed, device=args.device,
                         speed_aug=tuple(args.speed_aug) if args.speed_aug else None,
+                        amp=args.amp, run_args=vars(args),
+                        **({"n_modes": args.n_modes} if args.n_modes > 1 else {}),
                         **({"linear_skip": True, "residual": False} if args.ridge_prior else {}))
         elif args.command == "evaluate":
-            run_evaluation(args.label_dir, parse_ckpt_specs(args.ckpt), args.out_dir, args.device)
+            run_evaluation(args.label_dir, parse_ckpt_specs(args.ckpt), args.out_dir, args.device,
+                           cache_dir=args.cache_dir)
+        elif args.command == "crossval":
+            from .crossval import cross_validate, render
+
+            cv = cross_validate(args.label_dir, args.folds, future_len=args.future_len,
+                                arch=args.arch, epochs=args.epochs, seed=args.seed,
+                                device=args.device, cache_dir=args.cache_dir)
+            text = render(cv)
+            print("\n" + text)
+            if args.out:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.out).write_text(text + "\n", encoding="utf-8")
+        elif args.command == "download":
+            from .download import DEFAULT_BASE_URL, download_checkpoints
+
+            got = download_checkpoints(args.dir, args.base_url or DEFAULT_BASE_URL, args.force)
+            print(f"Downloaded {len(got)} file(s): {', '.join(got) or 'nothing to do'}")
         elif args.command == "analyze":
             model, windows, _ = _load_scene(args)
             if args.find_escalation:
                 res = find_escalation(model, windows, args.intervention, args.value,
-                                      mask_neighbors=args.no_context)
+                                      mask_neighbors=args.no_context, n_samples=args.samples)
                 if res is None:
                     sys.exit("This intervention does not raise the risk of any pair here.")
             else:
                 res = analyze_pair(model, windows, args.intervention, args.value,
-                                   args.max_distance, mask_neighbors=args.no_context)
+                                   args.max_distance, mask_neighbors=args.no_context,
+                                   n_samples=args.samples)
                 if res is None:
                     sys.exit("No co-occurring pair of agents found in this sequence.")
             print_report(res)

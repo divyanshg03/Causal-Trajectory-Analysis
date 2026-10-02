@@ -1,0 +1,8 @@
+{
+  "arch": "transformer",
+  "future-len": 10,
+  "ridge-prior": true,
+  "epochs": 60,
+  "seed": 0,
+  "cache-dir": "outputs/cache"
+}

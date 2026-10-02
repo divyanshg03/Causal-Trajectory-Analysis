@@ -1,0 +1,9 @@
+{
+  "arch": "social",
+  "future-len": 30,
+  "ridge-prior": true,
+  "n-modes": 5,
+  "epochs": 40,
+  "seed": 0,
+  "cache-dir": "outputs/cache"
+}

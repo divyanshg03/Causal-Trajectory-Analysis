@@ -15,6 +15,8 @@ Predict where road users will go on KITTI (in **meters**, bird's-eye view), rewr
 - **Counterfactual engine.** Two interventions (`speed`, `lateral`) rewrite an agent's history while keeping its current position; the social model lets the *other* agent react. `--find-escalation` searches a sequence for the pair whose risk an intervention raises the most.
 - **Validity checks, not just accuracy.** Predicted travel must grow monotonically with the speed factor (98.6-100% for the final models), plus a scene-context ablation and precision/recall of conflict detection against real near-misses.
 - **Social attention model** with inspectable attention over neighbors. It does **not** beat the non-social models here, and the ablation shows why (see [Findings](#findings)).
+- **Uncertainty-aware risk.** `analyze --samples N` reports P(overlap) and P(MEDIUM+) from sampled futures (MC dropout, or mode sampling for multi-modal models), and a **multi-modal head** (`--n-modes K`, winner-takes-all training, minADE/minFDE) is available.
+- **Calibration and validity extras.** Risk-tier reliability and an F1-optimal TTC cut-off, 95% bootstrap CIs over tracks, neighbor-reaction vs distance, and a physical-plausibility check (with a warning) for every intervention. Four interventions: `speed`, `lateral`, `brake`, `delay`. See [`docs/extra_results.md`](docs/extra_results.md).
 - **Interactive Streamlit explorer** and an animated risk overlay on KITTI frames.
 
 ## Quickstart
@@ -34,6 +36,17 @@ python -m cftraj demo --labels data/training/label_02/0019.txt --first-frame 560
 pip install -r requirements-app.txt && streamlit run app/streamlit_app.py
 ```
 
+Uncertainty, more interventions, and config files:
+
+```bash
+python -m cftraj download                                   # fetch checkpoints listed in checkpoints/MANIFEST.json (SHA-256 verified)
+python -m cftraj analyze --find-escalation --samples 50     # + P(overlap) / P(MEDIUM+) under sampled futures
+python -m cftraj analyze --intervention brake --value 0.8   # A had been braking (0 = no change, 1 = stopping now)
+python -m cftraj analyze --intervention delay --value 4     # A only started moving 4 frames ago
+python -m cftraj --config configs/social_multimodal_h30.json train   # options from a JSON/YAML file; flags override
+python -m cftraj crossval --folds 5 --out docs/crossval.md  # sequence-level k-fold (baselines; add --arch to train a model per fold)
+```
+
 Train and benchmark your own models:
 
 ```bash
@@ -42,7 +55,7 @@ python -m cftraj train --arch transformer --future-len 10 --ridge-prior --seed 0
 python -m cftraj evaluate --ckpt "social+ridge=outputs/social_s0.pt"      # one horizon per call
 ```
 
-`evaluate` accepts several comma-separated seeds per model (`--ckpt name=a.pt,b.pt,c.pt`) and reports mean ± std; all checkpoints in one call must share the same horizon. Shipped checkpoints: `checkpoints/social_h30.pt` (3 s, social + ridge prior) and `checkpoints/transformer_h10.pt` (1 s, Transformer + ridge prior), both seed 0. Run `python -m cftraj <command> -h` for all options.
+`evaluate` accepts checkpoints of different horizons in one call (one report per horizon) and several comma-separated seeds per model (`--ckpt name=a.pt,b.pt,c.pt`) and reports mean ± std; all checkpoints in one call must share the same horizon. Shipped checkpoints: `checkpoints/social_h30.pt` (3 s, social + ridge prior) and `checkpoints/transformer_h10.pt` (1 s, Transformer + ridge prior), both seed 0. Run `python -m cftraj <command> -h` for all options.
 
 ### Dataset setup
 
@@ -55,17 +68,18 @@ data/
     `-- label_02/0000.txt ... 0020.txt
 ```
 
+Add `--cache-dir outputs/cache` to `train`, `evaluate` and `crossval` to cache the neighbor search; `scripts/reproduce.sh` (or `make reproduce`) rebuilds every table in `docs/`. Other datasets can be plugged in via `cftraj.data.load_csv_trajectories` (columns `seq,frame,track,x,y`).
+
 **Split (by sequence, no window-level leakage):** test = 0018-0020; validation = 0004, 0011, 0017; train = the other 15. The validation sequences were chosen among the 18 non-test sequences so that their constant-velocity error matches the pooled average (label-derived; test never consulted). The obvious split 0015-0017 is dominated by a nearly static sequence, and early stopping on it stopped after one epoch.
 
 ### Tests
 
 ```bash
 pip install -r requirements-dev.txt
-ruff check .
-pytest
+make lint typecheck test     # ruff, mypy, pytest (make cov for coverage)
 ```
 
-CI runs both on every push. Tests that need the KITTI data and shipped checkpoints (the Streamlit app test) are skipped when those are absent.
+CI runs lint, mypy and the tests on Linux and Windows (Python 3.9 and 3.12) with coverage on every push. `cftraj.synthetic.write_synthetic_kitti` generates KITTI-format label files, so the full pipeline (train, evaluate, cross-validate) is tested without the dataset. Tests that need the KITTI data and shipped checkpoints (the Streamlit app test) are skipped when those are absent.
 
 ## How it works
 
@@ -127,16 +141,20 @@ cftraj/
   data.py            KITTI parsing, BEV trajectories (m), windows + neighbors, sequence splits
   model.py           Transformer / LSTM / social-attention models, ridge-initialised linear path
   baselines.py       stationary, constant velocity, Kalman (+ tuning), ridge regression
-  metrics.py         ADE / FDE / error by horizon
+  metrics.py         ADE / FDE / minADE / error by horizon / bootstrap CIs
+  crossval.py        sequence-level k-fold benchmark
+  download.py        checksum-verified checkpoint download
+  synthetic.py       KITTI-format synthetic labels for tests / CI
   train.py           mini-batch AdamW, mirror + optional speed augmentation, best-val checkpointing
   evaluate.py        benchmark tables + plots on the test split
-  validity.py        speed-response, context ablation, conflict detection P/R/F1
-  counterfactual.py  speed / lateral interventions
+  validity.py        speed-response, context ablation, conflict P/R/F1, risk calibration,
+                     neighbor reaction, intervention plausibility
+  counterfactual.py  speed / lateral / brake / delay interventions, plausibility check
   pairs.py           co-occurring pair selection
   risk.py            gap series, TTC, risk tiers, scene graph, explanation
   analyze.py         counterfactual analysis, escalation search, report, plots
   viz.py             attention plot, camera + BEV demo GIF
-  __main__.py        CLI: train / evaluate / analyze / demo / attention
+  __main__.py        CLI: train / evaluate / crossval / analyze / demo / attention / download
 app/streamlit_app.py interactive explorer
 tests/               pytest suite
 checkpoints/         shipped models
@@ -148,14 +166,18 @@ docs/                results tables, plots, demo
 - **Does not beat a linear model at 3 s**, and gains at 1 s are marginal (see Results). Accuracy claims should be read accordingly.
 - **Ego-camera frame.** Positions are not compensated for ego-motion (no OXTS data used). Pairwise relative quantities (gap, closing speed, TTC) are unaffected, but the speed intervention scales each agent's *apparent* motion, which includes the camera's own motion; for a parked car seen from a moving ego vehicle, "2x speed" means 2x the ego speed.
 - **Not causal inference.** Interventions are what-if rewrites of an agent's observed history followed by a forward pass, with no structural causal model. The validity checks test sanity (monotonicity, scale), not ground truth, since the true counterfactual is unobservable.
-- **Heuristic risk and ground truth.** Risk thresholds are uncalibrated, and a "real conflict" is a true center-to-center gap under 3 m, which ignores agent size and orientation.
+- **Heuristic risk and ground truth.** Risk thresholds are heuristic: the calibration report shows LOW and MEDIUM are barely distinguishable and the F1-optimal TTC cut-off (4-4.5 s) differs from the 5 s bound (see [`docs/extra_results.md`](docs/extra_results.md)). A "real conflict" is a "real conflict" is a true center-to-center gap under 3 m, which ignores agent size and orientation.
+- **Out-of-distribution counterfactuals.** About 15% of real KITTI histories already exceed 10 m/s^2 (label jitter), and `speed = 2` pushes another ~30% over; `analyze` warns when the intervened history is implausible. The social model's reaction to a changed neighbor does not grow with proximity, so B's "reaction" is weak evidence of interaction.
+- **Multi-modal head is a first cut.** At 3 s the 5-mode model reaches minADE 0.68 m (best of 5) but its most-likely mode is worse than ridge (1.156 vs 1.074 m ADE), so it is useful for coverage and uncertainty, not as a better point predictor.
 - **Small data, fixed split, 3 seeds.** The test split is dominated by sequence 0019 (about half of its windows). Selection (early stopping, Kalman tuning, validation split choice) used only non-test sequences; I looked at test error across epochs once while diagnosing overfitting, before fixing the validation split, and did not use it to select anything.
 
 ## Roadmap
 
 - Ego-motion compensation (OXTS), per-class (car / pedestrian / cyclist) results.
-- Train on more data (e.g. nuScenes / Waymo) where interaction signal may exist, and give the social model an explicit interaction loss.
-- Calibrate risk thresholds against a proper conflict definition (agent footprints, headings).
+- Train on more data (e.g. nuScenes / Waymo; the CSV loader is the entry point) where interaction signal may exist, and give the social model an explicit interaction loss.
+- Map / lane context, which KITTI tracking labels do not provide.
+- Calibrate risk thresholds against a proper conflict definition (agent footprints, headings), and fit the TTC cut-off on validation rather than test.
+- Move `checkpoints/*.pt` to a GitHub Release (the `download` command and manifest are ready; the release itself still has to be created by the maintainer) and host the Streamlit explorer.
 
 ## Author
 
