@@ -17,6 +17,7 @@ Predict where road users will go on KITTI (in **meters**, bird's-eye view), rewr
 - **Social attention model** with inspectable attention over neighbors. It does **not** beat the non-social models here, and the ablation shows why (see [Findings](#findings)).
 - **Uncertainty-aware risk.** `analyze --samples N` reports P(overlap) and P(MEDIUM+) from sampled futures (MC dropout, or mode sampling for multi-modal models), and a **multi-modal head** (`--n-modes K`, winner-takes-all training, minADE/minFDE) is available.
 - **Calibration and validity extras.** Risk-tier reliability and an F1-optimal TTC cut-off, 95% bootstrap CIs over tracks, neighbor-reaction vs distance, and a physical-plausibility check (with a warning) for every intervention. Four interventions: `speed`, `lateral`, `brake`, `delay`. See [`docs/extra_results.md`](docs/extra_results.md).
+- **Web explorer** (`cftraj serve`): FastAPI backend running the real models live plus a no-build browser UI; see [below](#web-explorer).
 - **Interactive Streamlit explorer** and an animated risk overlay on KITTI frames.
 
 ## Quickstart
@@ -33,7 +34,8 @@ python -m cftraj analyze --find-escalation --intervention lateral --value 3
 python -m cftraj attention --labels data/training/label_02/0019.txt
 python -m cftraj demo --labels data/training/label_02/0019.txt --first-frame 560 --out docs/demo.gif
 
-pip install -r requirements-app.txt && streamlit run app/streamlit_app.py
+pip install -e ".[web]" && python -m cftraj serve        # web explorer at http://127.0.0.1:8000
+pip install -r requirements-app.txt && streamlit run app/streamlit_app.py   # older Streamlit explorer
 ```
 
 Uncertainty, more interventions, and config files:
@@ -80,6 +82,22 @@ make lint typecheck test     # ruff, mypy, pytest (make cov for coverage)
 ```
 
 CI runs lint, mypy and the tests on Linux and Windows (Python 3.9 and 3.12) with coverage on every push. `cftraj.synthetic.write_synthetic_kitti` generates KITTI-format label files, so the full pipeline (train, evaluate, cross-validate) is tested without the dataset. Tests that need the KITTI data and shipped checkpoints (the Streamlit app test) are skipped when those are absent.
+
+## Web explorer
+
+```bash
+pip install -e ".[web]"
+python -m cftraj serve            # then open http://127.0.0.1:8000  (--port, --ckpt-dir, --label-dir)
+```
+
+![Web explorer](docs/web_explorer.png)
+
+A FastAPI backend (`cftraj/server.py`, JSON API with docs at `/api/docs`) runs the checkpoints in `checkpoints/` on the labels in `data/`, and a dependency-free frontend (`web/`: HTML, CSS and vanilla JS, no build step) renders it. It opens on the pair the default intervention escalates most.
+
+- **Bird's-eye view** with pan / zoom, observed pasts, predicted futures, counterfactual futures (B's reaction in orange), ground truth, other agents, and a time scrubber with play.
+- **Controls:** pick the moment, the agent pair, one of four interventions (speed, sideways drift, braking, late start), social-context masking, and optional uncertainty estimates; or jump to the riskiest pair in the sequence.
+- **Readouts:** risk tier before and after, closest approach / TTC / closing speed with deltas, the A-B gap over time, P(overlap) under uncertainty, the social model's attention over neighbors, and a warning when the intervened history is physically implausible.
+- State lives in the URL hash, so a view can be shared as a link; light and dark themes follow the system setting. The server binds to localhost and only loads models and sequences by name from the configured directories.
 
 ## How it works
 
@@ -168,8 +186,10 @@ cftraj/
   risk.py            gap series, TTC, risk tiers, scene graph, explanation
   analyze.py         counterfactual analysis, escalation search, report, plots
   viz.py             attention plot, camera + BEV demo GIF
-  __main__.py        CLI: train / evaluate / crossval / analyze / demo / attention / download
-app/streamlit_app.py interactive explorer
+  server.py          FastAPI backend for the web explorer (cftraj serve)
+  __main__.py        CLI: train / evaluate / crossval / ethucy / analyze / demo / attention / serve / download
+web/                 browser frontend (index.html, style.css, app.js)
+app/streamlit_app.py older Streamlit explorer
 tests/               pytest suite
 checkpoints/         shipped models
 docs/                results tables, plots, demo

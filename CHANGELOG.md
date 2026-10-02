@@ -18,6 +18,9 @@
 - `cftraj.synthetic`, `cftraj.data.load_csv_trajectories`, `py.typed`, mypy, coverage gate,
   CI matrix (Linux/Windows, Python 3.9/3.12), Makefile, `scripts/reproduce.sh`.
 
+- `cftraj serve`: FastAPI backend and a browser frontend in `web/` (`pip install -e ".[web]"`).
+- `cftraj ethucy` second-dataset benchmark; `--track wandb|mlflow`.
+
 ### Changed
 - `find_escalation` predicts all pairs in batched calls instead of one pair at a time
   (same result, much faster).

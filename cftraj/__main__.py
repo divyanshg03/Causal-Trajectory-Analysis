@@ -97,6 +97,14 @@ def build_parser():
     eu.add_argument("--out", default=None, help="write the markdown table here")
     eu.add_argument("--device", default="auto")
 
+    sv = sub.add_parser("serve", help="web explorer (FastAPI backend + browser UI)")
+    sv.add_argument("--label-dir", default=DEFAULT_DIR)
+    sv.add_argument("--ckpt-dir", default="checkpoints")
+    sv.add_argument("--image-dir", default=None, help="KITTI image_02 folder (default: next to label_02)")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8000)
+    sv.add_argument("--device", default="cpu")
+
     dl = sub.add_parser("download", help="fetch the shipped checkpoints listed in MANIFEST.json")
     dl.add_argument("--dir", default="checkpoints")
     dl.add_argument("--base-url", default=None, help="release URL holding the .pt files")
@@ -214,6 +222,14 @@ def main(argv=None):
             if args.out:
                 Path(args.out).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.out).write_text(text + "\n", encoding="utf-8")
+        elif args.command == "serve":
+            try:
+                from .server import serve
+            except ImportError as err:
+                raise RuntimeError("The web explorer needs: pip install 'cftraj[web]'") from err
+            print(f"Open http://{args.host}:{args.port}")
+            serve(args.host, args.port, label_dir=args.label_dir, ckpt_dir=args.ckpt_dir,
+                  image_dir=args.image_dir, device=args.device)
         elif args.command == "download":
             from .download import DEFAULT_BASE_URL, download_checkpoints
 
