@@ -1,6 +1,6 @@
 # Counterfactual Scene Reasoning for Trajectory Prediction
 
-[![CI](https://github.com/divyanshg03/Casual-Trajectory-Analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/divyanshg03/Casual-Trajectory-Analysis/actions/workflows/ci.yml)
+[![CI](https://github.com/divyanshg03/Causal-Trajectory-Analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/divyanshg03/Causal-Trajectory-Analysis/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue) ![License](https://img.shields.io/badge/license-Apache%202.0-green)
 
 Predict where road users will go on KITTI (in **meters**, bird's-eye view), rewrite one agent's observed motion ("what if A had been moving twice as fast?"), and measure how the predicted **time-to-collision (TTC) risk** of a pair changes. Includes a social-attention model, honest benchmarks against classical baselines, validity checks for the counterfactuals, and an interactive demo.
@@ -22,8 +22,8 @@ Predict where road users will go on KITTI (in **meters**, bird's-eye view), rewr
 ## Quickstart
 
 ```bash
-git clone https://github.com/divyanshg03/Casual-Trajectory-Analysis
-cd Casual-Trajectory-Analysis
+git clone https://github.com/divyanshg03/Causal-Trajectory-Analysis
+cd Causal-Trajectory-Analysis
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
