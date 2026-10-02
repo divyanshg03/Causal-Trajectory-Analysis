@@ -126,6 +126,20 @@ Test split: KITTI sequences 0018-0020. Errors in meters; learned models are mean
 - **Counterfactual responses are physically sensible.** Scaling an agent's past speed by 2x scales its predicted travel by 2.00 ± 0.01x with the ridge prior, travel at 0x is 0-0.2 m, and predictions are monotone in speed for 98.6-100% of agents. The social model without the ridge prior is the exception at 3 s (90.5% monotone, 0.72 m of travel at 0x).
 - **The social model does not use its neighbors well.** Masking all neighbors at test time leaves error unchanged or slightly *better* (3 s, social + ridge prior: 1.085 -> 1.065 m), and attention weights are close to uniform (`docs/attention.png`). With ~2 neighbors per agent on average and only 15 training sequences, there is little interaction signal to learn from.
 
+### Second dataset: ETH/UCY pedestrians
+
+`python -m cftraj ethucy` runs the standard leave-one-scene-out protocol (8 observed -> 12 predicted steps at 2.5 Hz; ridge-prior models, 3 seeds, 40 epochs; data layout in the command's `--root` help). ADE / FDE in meters; full table in [`docs/ethucy.md`](docs/ethucy.md).
+
+| Method | eth | hotel | univ | zara1 | zara2 | Average |
+|---|---|---|---|---|---|---|
+| Constant velocity | 1.04 / 2.22 | **0.25 / 0.48** | 0.59 / 1.25 | 0.48 / 1.02 | 0.36 / 0.78 | 0.54 / 1.15 |
+| Linear (ridge) | 1.06 / 2.13 | 0.45 / 0.91 | **0.51 / 1.10** | 0.44 / 0.99 | 0.32 / 0.71 | 0.55 / 1.17 |
+| Transformer + ridge prior | 1.08 / 2.19 | 0.42 / 0.85 | 0.53 / 1.16 | 0.40 / 0.89 | 0.30 / 0.67 | 0.54 / 1.15 |
+| Social + ridge prior | 1.06 / 2.15 | 0.42 / 0.85 | 0.54 / 1.19 | **0.39 / 0.86** | 0.30 / 0.67 | 0.54 / 1.14 |
+| Social, neighbors masked | 1.06 / 2.15 | 0.46 / 0.96 | 0.52 / 1.14 | 0.40 / 0.89 | 0.30 / 0.66 | 0.55 / 1.16 |
+
+The picture matches KITTI: **nothing meaningfully beats constant velocity on average** (0.54 vs 0.54-0.55 m), and the social model's neighbors help only slightly and inconsistently (hotel 0.46 -> 0.42, zara1 0.40 -> 0.39, but univ 0.52 -> 0.54, a difference within seed noise). The models here are small, trained on a few thousand windows per scene, and not tuned for this benchmark, so this shows the KITTI conclusion is not an artifact of sparse vehicle scenes, not that social modelling cannot help; published social models report gains with much larger models and tuned training.
+
 ![Counterfactual: speed x2 turns a SAFE pair into HIGH](docs/counterfactual_example.png)
 
 *`analyze --find-escalation` on sequence 0019: speeding up A (green -> red) makes B (orange) react, and the pair's risk goes SAFE -> HIGH (closest approach 11.5 m -> 1.2 m, TTC 2.8 s).*
@@ -174,7 +188,7 @@ docs/                results tables, plots, demo
 ## Roadmap
 
 - Ego-motion compensation (OXTS), per-class (car / pedestrian / cyclist) results.
-- Train on more data (e.g. nuScenes / Waymo; the CSV loader is the entry point) where interaction signal may exist, and give the social model an explicit interaction loss.
+- Train on more data (ETH/UCY is supported via `cftraj ethucy`; nuScenes / Waymo via the CSV loader) and tune the social model, and give the social model an explicit interaction loss.
 - Map / lane context, which KITTI tracking labels do not provide.
 - Calibrate risk thresholds against a proper conflict definition (agent footprints, headings), and fit the TTC cut-off on validation rather than test.
 - Move `checkpoints/*.pt` to a GitHub Release (the `download` command and manifest are ready; the release itself still has to be created by the maintainer) and host the Streamlit explorer.
