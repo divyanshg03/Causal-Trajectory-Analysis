@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Counterfactual Trajectory Explorer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M3 18c4-1 5-5 8-7s6-1 10-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 18c4 0 8 1 10-2s3-5 8-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="2 3" opacity=".6"/></svg>
+    <div>
+      <h1>Counterfactual Trajectory Explorer</h1>
+      <p>What if one road user had moved differently? See how predicted collision risk changes.</p>
+    </div>
+  </div>
+  <div class="top-controls">
+    <label>Model <select id="model"></select></label>
+    <label>Sequence <select id="seq"></select></label>
+    <button id="theme" class="icon-btn" title="Toggle light / dark" aria-label="Toggle theme">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" fill="currentColor"/></svg>
+    </button>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main class="layout">
+  <aside class="panel controls" aria-label="Scene controls">
+    <section>
+      <h2>1 · Moment</h2>
+      <div class="row between"><span id="frame-label" class="muted">frame –</span><span id="agents-label" class="muted"></span></div>
+      <input id="frame" type="range" min="0" max="0" value="0" aria-label="Window start frame">
+      <canvas id="frame-ticks" height="22" aria-hidden="true"></canvas>
+    </section>
+
+    <section>
+      <h2>2 · Agent pair</h2>
+      <p class="hint">A is intervened on; B is the other road user.</p>
+      <ul id="pairs" class="pairs" role="listbox" aria-label="Candidate pairs"></ul>
+    </section>
+
+    <section>
+      <h2>3 · Intervention on A</h2>
+      <div id="kinds" class="segmented" role="radiogroup" aria-label="Intervention kind"></div>
+      <div class="row between slider-head">
+        <label for="value" id="value-label">Value</label>
+        <output id="value-out" class="mono"></output>
+      </div>
+      <input id="value" type="range" aria-describedby="kind-help">
+      <p id="kind-help" class="hint"></p>
+      <label class="check"><input id="mask" type="checkbox"><span>Ignore scene context <span class="muted">(mask neighbors)</span></span></label>
+      <label class="check"><input id="samples" type="checkbox"><span>Estimate uncertainty <span class="muted">(30 sampled futures)</span></span></label>
+    </section>
+
+    <section>
+      <button id="escalate" class="primary">Find the riskiest pair in this sequence</button>
+      <p class="hint">Searches every nearby pair for the one whose risk this intervention raises most.</p>
+    </section>
+  </aside>
+
+  <section class="panel stage" aria-label="Bird's-eye view">
+    <div class="stage-head">
+      <div class="legend" id="legend"></div>
+      <div class="toggles">
+        <label class="check"><input id="show-truth" type="checkbox" checked> Ground truth</label>
+        <label class="check"><input id="show-others" type="checkbox" checked> Other agents</label>
+      </div>
+    </div>
+    <div class="bev-wrap">
+      <svg id="bev" role="img" aria-label="Bird's-eye view of observed and predicted trajectories"></svg>
+      <div id="bev-empty" class="empty" hidden></div>
+      <div id="spinner" class="spinner" hidden></div>
+      <button id="fit" class="icon-btn fit" title="Reset view" aria-label="Reset view">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="player">
+      <button id="play" class="icon-btn" aria-label="Play prediction">
+        <svg id="play-ico" viewBox="0 0 24 24" width="18" height="18"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+      </button>
+      <input id="t" type="range" min="0" max="30" value="30" aria-label="Prediction time step">
+      <span id="t-label" class="mono muted">+3.0 s</span>
+    </div>
+  </section>
+
+  <aside class="panel results" aria-label="Results">
+    <div id="risk-card" class="risk-card"></div>
+    <div id="warn" class="warn" hidden></div>
+    <section>
+      <h2>Metrics</h2>
+      <table id="metrics" class="metrics"></table>
+    </section>
+    <section>
+      <h2>Gap between A and B</h2>
+      <svg id="gap" class="gap" role="img" aria-label="Predicted distance between A and B over time"></svg>
+    </section>
+    <section id="unc-sec" hidden>
+      <h2>Under uncertainty</h2>
+      <div id="unc"></div>
+    </section>
+    <section id="att-sec" hidden>
+      <h2>Attention of A over neighbors</h2>
+      <div id="att"></div>
+    </section>
+    <section>
+      <h2>Explanation</h2>
+      <p id="expl" class="expl"></p>
+    </section>
+  </aside>
+</main>
+
+<footer>
+  The intervention rewrites A's observed past while keeping its current position. It is a what-if perturbation of the
+  model input, not a causal model. Positions are bird's-eye-view meters in the ego-camera frame.
+</footer>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
