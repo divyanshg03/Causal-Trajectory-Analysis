@@ -122,8 +122,13 @@ def find_escalation(model, windows, kind="speed", value=2.0, max_pair_distance=1
     if use_ctx:
         nbr_b_cf = neighbors_with_replaced(windows, pairs, past_a_cf)
 
-    def run(past, nbr, nm):
-        return predict_numpy(model, past, nbr=nbr, nmask=nm)
+    def run(past, nbr, nm, chunk=256):
+        # Chunked so a sequence with thousands of pairs doesn't allocate one huge batch.
+        parts = [predict_numpy(model, past[s:s + chunk],
+                               nbr=None if nbr is None else nbr[s:s + chunk],
+                               nmask=None if nm is None else nm[s:s + chunk])
+                 for s in range(0, len(past), chunk)]
+        return np.concatenate(parts)
 
     pred_a, pred_b = run(windows.X[i], nbr_a, nm_a), run(windows.X[j], nbr_b, nm_b)
     cf_a, cf_b = run(past_a_cf, nbr_a, nm_a), run(windows.X[j], nbr_b_cf, nm_b)
