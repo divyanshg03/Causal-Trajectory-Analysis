@@ -1,0 +1,6 @@
+# Render blueprint: New + > Blueprint, point at this repo. Free plan sleeps when idle (first request wakes it, ~30-60 s).
+services:
+  - type: web
+    name: counterfactual-trajectory-explorer
+    runtime: docker
+    plan: free
